@@ -1,5 +1,7 @@
 import subprocess
 import os
+import sys
+import platform
 import signal
 import argparse
 import threading
@@ -13,6 +15,17 @@ timestamp_lock = threading.Lock()
 
 # Global flag to indicate if a clean exit has been requested
 exit_requested = False
+
+def get_os():
+    """Determines the operating system."""
+    if sys.platform.startswith('linux'):
+        return "Linux"
+    elif sys.platform.startswith('darwin'):
+        return "macOS"
+    elif sys.platform.startswith('win'):
+        return "Windows"
+    else:
+        return platform.system()  # Fallback to the more general platform.system()
 
 def signal_handler(sig, frame):
     """Handles the SIGINT signal (CTRL+C)."""
@@ -62,7 +75,7 @@ def save_optimized_timestamp(directory, filename, timestamp):
         except IOError:
             print(f"Error: Could not save optimized timestamp for {filename}.")
 
-def optimize_png(filename, optipng_path="optipng", optimization_level=5, worker_id=None, progress_dict=None):
+def optimize_png(filename, optipng_path="optipngp", optimization_level=5, worker_id=None, progress_dict=None):
     """Optimizes a single PNG file using optipng and reports progress."""
     worker_prefix = f"[Worker {worker_id}] " if worker_id is not None else ""
     original_size = get_file_size(filename)
@@ -124,10 +137,10 @@ def main():
     parser.add_argument("directory", help="The directory containing the PNG files to optimize.")
     parser.add_argument("-t", "--threads", type=int, default=8, help="The number of threads to use for parallel optimization (default: 8).")
     parser.add_argument("-o", "--optimization-level", type=int, default=5, choices=range(0, 8), help="The optipng optimization level (0-7, default: 5).")
-    parser.add_argument("--optipng-path", type=str, default="optipng", help="The path to the optipng executable if it's not in your system's PATH.")
+    parser.add_argument("--optipng-path", type=str, default="default", help="The path to the optipng executable if it's not in your system's PATH.")
     parser.add_argument("-R", "--recursive", action="store_true", help="Search for PNG files recursively in subdirectories.")
-    parser.add_argument("--smoothing", type=float, default=0.5, help="Smoothing factor for tqdm's ETA (0-1, higher values are smoother).")
-    parser.add_argument("--mininterval", type=float, default=1.0, help="Minimum update interval for tqdm's progress bar (in seconds).")
+    parser.add_argument("--smoothing", type=float, default=0.8, help="Smoothing factor for tqdm's ETA (0-1, higher values are smoother).")
+    parser.add_argument("--mininterval", type=float, default=1, help="Minimum update interval for tqdm's progress bar (in seconds).")
 
     args = parser.parse_args()
     directory = args.directory
@@ -137,6 +150,22 @@ def main():
     recursive = args.recursive
     smoothing = args.smoothing
     mininterval = args.mininterval
+
+    if optipng_path == "default":
+        operating_system = get_os()
+
+        if operating_system == "Linux":
+            print("Running on Linux, using optipngp shell script to preserve timestamps.")
+            optipng_path = "optipngp"
+        elif operating_system == "macOS":
+            print("Running on MacOS, using optipngp shell script to preserve timestamps.")
+            optipng_path = "optipngp"
+        elif operating_system == "Windows":
+            print("Running on Windows, using optipng directly with the -preserve parameter.")
+            optipng_path = "optipng"
+        else:
+            print(f"Running on an unidentified operating system: {operating_system}")
+            optipng_path = "optipng"
 
     if not os.path.isdir(directory):
         print(f"Error: Directory '{directory}' not found.")
@@ -170,7 +199,14 @@ def main():
 
     print(f"Optimizing {len(files_to_optimize)} new/modified PNG files using {num_threads} threads.")
 
-    progress_bar = tqdm(total=len(files_to_optimize), unit="file", desc="", bar_format=colored("", 'light_blue') + colored("{bar}", 'light_blue') + colored("", 'light_blue') + " {percentage:.2f}% │ [{n_fmt}/{total_fmt} e:{elapsed} r:{remaining}, {rate_fmt}{postfix}]", dynamic_ncols=True, smoothing=smoothing, mininterval=mininterval)
+    progress_bar = tqdm(total=len(files_to_optimize),
+                        desc="",
+                        bar_format=colored("", 'light_blue') + colored("{bar}", 'light_blue') + colored("", 'light_blue') +
+                                    " {percentage:.2f}% {n_fmt}/{total_fmt} T {elapsed}/{remaining} {unit}",
+                        unit="S "+convert_bytes(0),
+                        dynamic_ncols=True,
+                        smoothing=smoothing,
+                        mininterval=mininterval)
     start_time = time.time()
     processed_count = 0
     successful_optimizations = 0
@@ -180,7 +216,7 @@ def main():
     worker_id_counter = 1
 
     def worker(filename, worker_id):
-        nonlocal processed_count, successful_optimizations, total_savings_bytes
+        nonlocal processed_count, successful_optimizations, total_savings_bytes, progress_bar
         
         if exit_requested:
             print(f"[Worker {worker_id}] Received exit signal. Terminating.")
@@ -198,6 +234,7 @@ def main():
                 worker_progress[filename]['status'] = 'Error'
                 worker_progress[filename]['output'] = output.strip()
             processed_count += 1
+            progress_bar.unit="S "+convert_bytes(total_savings_bytes)
             progress_bar.update(1)
         else:
             print(f"[Worker {worker_id}] Optimization of {os.path.basename(filename)} interrupted.")
