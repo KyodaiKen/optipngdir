@@ -14,10 +14,6 @@ fi
 # Extract the filename (the last argument)
 filename="${!num_args}"
 
-# Remove the last argument from the list of positional parameters
-# This leaves $@ containing only the optipng options
-shift $((num_args - 1))
-
 # Check if the file exists
 if [ ! -f "$filename" ]; then
   echo "Error: File '$filename' not found."
@@ -29,6 +25,7 @@ original_mtime=$(date -r "$filename" +%s)
 original_atime=$(stat -c %X "$filename") # Access time might not always be reliable over CIFS
 
 # Run optipng, passing all remaining arguments and the filename
+echo optipng "$@"
 if ! optipng "$@"; then
   echo "Error: optipng failed to process '$filename'."
   exit 1
