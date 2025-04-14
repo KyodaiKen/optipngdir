@@ -8,11 +8,26 @@ import argparse
 import threading
 import time
 import json
+import re
+import hashlib
 from termcolor import colored
 from tqdm import tqdm
 
 # Global flag to indicate if a clean exit has been requested
 exit_requested = False
+UNICODE_DETECT_REGEX = re.compile(r'[^\x00-\x7F]')  # Matches any non-ASCII character
+
+def has_unicode(filename):
+    """Checks if a filename contains Unicode characters."""
+    return bool(UNICODE_DETECT_REGEX.search(filename))
+
+def generate_temp_filename(filename):
+    """Generates a temporary filename based on the hash of the original (Unicode-aware)."""
+    filepath, base = os.path.split(os.path.abspath(filename))
+    base, ext = os.path.splitext(base)
+    encoded_base = base.encode('utf-8')
+    hashed_base = hashlib.md5(encoded_base).hexdigest()[:8]  # Use first 8 chars of MD5 hash
+    return os.path.join(filepath, f"{hashed_base}_temp{ext}")
 
 def get_os():
     """Determines the operating system."""
@@ -24,6 +39,16 @@ def get_os():
         return "Windows"
     else:
         return platform.system()  # Fallback to the more general platform.system()
+
+def get_modified_time_long_path(filepath):
+    """Gets the modification time for potentially long paths."""
+    if os.name == 'nt' and not filepath.startswith('\\\\?\\'):
+        filepath = '\\\\?\\' + os.path.abspath(filepath)
+    try:
+        return os.path.getmtime(filepath)
+    except OSError as e:
+        print(f"Error getting modification time for '{filepath}': {e}")
+        return None
 
 def signal_handler(sig, frame):
     """Handles the SIGINT signal (CTRL+C)."""
@@ -111,10 +136,45 @@ def save_optimized_timestamps(optimized_timestamps, timestamp_file):
     except IOError:
         print(f"Error: Could not save optimized timestamps in {timestamp_file}.")
 
-def optimize_png(filename, optipng_path="optipngp", optimization_level=5, worker_id=None, progress_dict=None):
-    """Optimizes a single PNG file using optipng and reports progress."""
+def format_time(seconds):
+    """Formats seconds into days:HH:MM:SS.ms, showing only relevant parts."""
+    milliseconds = int(round((seconds - int(seconds)) * 1000))
+    seconds = int(seconds)
+    minutes = seconds // 60
+    seconds %= 60
+    hours = minutes // 60
+    minutes %= 60
+    days = hours // 24
+    hours %= 24
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days} days")
+    if days > 0 or hours > 0:
+        parts.append(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+    else:
+        parts.append(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+
+    return f"{':'.join(parts)}.{milliseconds:03d}"
+
+def optimize_png(progress_bar, original_filename, optipng_path="optipngp", optimization_level=5, worker_id=None, progress_dict=None, fix_errors=False):
+    """Optimizes a single PNG file using optipng and reports progress, handling Unicode filenames."""
     worker_prefix = f"[Worker {worker_id}] " if worker_id is not None else ""
-    original_size = get_file_size(filename)
+    original_size = get_file_size(original_filename)
+    temp_filename = None
+    filename_to_process = original_filename
+    renamed = False
+
+    if has_unicode(original_filename) and get_os() == "Windows":
+        temp_filename = generate_temp_filename(original_filename)
+        try:
+            os.rename(original_filename, temp_filename)
+            filename_to_process = temp_filename
+            renamed = True
+            progress_bar.write(f"{worker_prefix}Renamed '{original_filename}' to '{temp_filename}' for optipng processing.")
+        except OSError as e:
+            return [], False, f"Error renaming file '{original_filename}': {e}", 0
+
     try:
         command = [
             optipng_path,
@@ -122,9 +182,11 @@ def optimize_png(filename, optipng_path="optipngp", optimization_level=5, worker
             "all",
             "-preserve",
             f"-o{optimization_level}",
-            filename,
         ]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # Don't decode here
+        if fix_errors:
+            command.append("-fix")
+        command.append(filename_to_process)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         stdout_bytes, stderr_bytes = process.communicate()
 
@@ -132,26 +194,32 @@ def optimize_png(filename, optipng_path="optipngp", optimization_level=5, worker
             stdout = stdout_bytes.decode('utf-8')
             stderr = stderr_bytes.decode('utf-8')
         except UnicodeDecodeError:
-            stdout = stdout_bytes.decode(errors='replace')  # Replace undecodable characters
+            stdout = stdout_bytes.decode(errors='replace')
             stderr = stderr_bytes.decode(errors='replace')
 
         for line in stdout.splitlines():
-            if progress_dict is not None and filename in progress_dict:
-                progress_dict[filename]['worker_output'] = line.strip()
+            if progress_dict is not None and original_filename in progress_dict:
+                progress_dict[original_filename]['worker_output'] = line.strip()
 
-        stdout, stderr = process.communicate()
+        if renamed and os.path.exists(temp_filename) and original_filename != temp_filename:
+            try:
+                os.rename(temp_filename, original_filename)
+                progress_bar.write(f"{worker_prefix}Renamed '{temp_filename}' back to '{original_filename}'.")
+            except OSError as e:
+                progress_bar.write(f"{worker_prefix}Error renaming '{temp_filename}' back to '{original_filename}': {e}")
 
         if process.returncode == 0:
-            optimized_size = get_file_size(filename)
+            optimized_size = get_file_size(filename_to_process)
             savings = original_size - optimized_size
-            return command, True, stdout, savings
+            return command, True, stdout.strip(), savings
         else:
-            return command, False, stderr, 0
+            error_message = stderr.strip()
+            return command, False, error_message, 0
 
     except FileNotFoundError:
-        return False, f"Error: optipng command not found.", 0
+        return [], False, f"Error: optipng command not found.", 0
     except Exception as e:
-        return False, str(e), 0
+        return [], False, str(e), 0
 
 def find_png_files(directory, recursive=True):
     """Finds all PNG files in the given directory."""
@@ -173,10 +241,9 @@ def main():
     parser.add_argument("directory", help="The directory containing the PNG files to optimize.")
     parser.add_argument("-t", "--threads", type=int, default=8, help="The number of threads to use for parallel optimization (default: 8).")
     parser.add_argument("-o", "--optimization-level", type=int, default=5, choices=range(0, 8), help="The optipng optimization level (0-7, default: 5).")
+    parser.add_argument("-f", "--fix", action="store_true", help="Instruct OPTIPNG to fix PNG files.")
     parser.add_argument("--optipng-path", type=str, default="default", help="The path to the optipng executable if it's not in your system's PATH.")
     parser.add_argument("-R", "--recursive", action="store_true", help="Search for PNG files recursively in subdirectories.")
-    parser.add_argument("--smoothing", type=float, default=0.8, help="Smoothing factor for tqdm's ETA (0-1, higher values are smoother).")
-    parser.add_argument("--mininterval", type=float, default=1, help="Minimum update interval for tqdm's progress bar (in seconds).")
 
     args = parser.parse_args()
     directory = args.directory
@@ -184,8 +251,7 @@ def main():
     optimization_level = args.optimization_level
     optipng_path = args.optipng_path
     recursive = args.recursive
-    smoothing = args.smoothing
-    mininterval = args.mininterval
+    fix_errors = args.fix
 
     if optipng_path == "default":
         operating_system = get_os()
@@ -216,13 +282,13 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     for normalized_path, original_path in existing_png_files_map.items():
-        current_timestamp = os.path.getmtime(original_path)
+        current_timestamp = get_modified_time_long_path(original_path)
         if normalized_path in optimized_timestamps and optimized_timestamps[normalized_path] == current_timestamp:
             skipped_count += 1
         else:
             files_to_optimize.append(original_path)
 
-    print(f"Found {total_files_found} PNG files.")
+    print(f"Found {total_files_found} PNG files{' recursively' if recursive else ''}.")
     print(f"Skipping {skipped_count} already optimized files.")
     if not files_to_optimize:
         print("No new files to optimize.")
@@ -230,15 +296,14 @@ def main():
 
     print(f"Optimizing {len(files_to_optimize)} new/modified PNG files using {num_threads} threads.")
 
+    start_time = time.time()
+
     progress_bar = tqdm(total=len(files_to_optimize),
                         desc="",
                         bar_format=colored("", 'light_blue') + colored("{bar}", 'light_blue') + colored("", 'light_blue') +
                                            " {percentage:.2f}% {n_fmt}/{total_fmt} T {elapsed}/{remaining} {unit}",
                         unit="S "+convert_bytes(0),
-                        dynamic_ncols=True,
-                        smoothing=smoothing,
-                        mininterval=mininterval)
-    start_time = time.time()
+                        dynamic_ncols=True)
     processed_count = 0
     successful_optimizations = 0
     total_savings_bytes = 0
@@ -247,29 +312,39 @@ def main():
     worker_id_counter = 1
 
     def worker(filename, worker_id):
-        nonlocal processed_count, successful_optimizations, total_savings_bytes, progress_bar, directory
+        nonlocal files_to_optimize, processed_count, successful_optimizations, total_savings_bytes, progress_bar, directory, fix_errors
 
         if exit_requested:
             progress_bar.write(f"[Worker {worker_id}] Received exit signal. Terminating.")
             return
 
         worker_progress[filename] = {'status': 'Processing', 'output': ''}
-        command, success, output, savings = optimize_png(filename, optipng_path, optimization_level, worker_id, worker_progress)
+        command, success, output, savings = optimize_png(progress_bar, filename, optipng_path, optimization_level, worker_id, worker_progress, fix_errors)
         if not exit_requested:
             if success:
                 successful_optimizations += 1
                 total_savings_bytes += savings
                 worker_progress[filename]['status'] = 'Done'
-                add_optimized_timestamp(optimized_timestamps, filename, directory, os.path.getmtime(filename))
+                add_optimized_timestamp(optimized_timestamps, filename, directory, get_modified_time_long_path(filename))
             else:
                 worker_progress[filename]['status'] = 'Error'
-                worker_progress[filename]['output'] = output.strip().decode('utf-8', errors='replace')
+                worker_progress[filename]['output'] = output
                 str_command = " ".join(command)
-                progress_bar.write(colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold']) + 
-                                   colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan') + 
+                progress_bar.write(colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold']) +
+                                   colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan') +
                                    worker_progress[filename]['output']+"\n")
             processed_count += 1
             progress_bar.unit="S "+convert_bytes(total_savings_bytes)
+
+            time_finished = time.time()
+            if processed_count > 0:
+                avg_processing_time = (time_finished - start_time) / processed_count
+                remaining_files = len(files_to_optimize) - processed_count
+                estimated_remaining_time = remaining_files * avg_processing_time
+                progress_bar.set_postfix(est_rem=tqdm.format_interval(estimated_remaining_time))
+            else:
+                progress_bar.set_postfix(est_rem="?")
+
             progress_bar.update(1)
         else:
             progress_bar.write(f"[Worker {worker_id}] Optimization of {os.path.basename(filename)} interrupted.")
@@ -311,7 +386,7 @@ def main():
         print(f"Total files processed (new/modified): {len(files_to_optimize)}")
         print(f"Successfully optimized: {successful_optimizations}")
         print(f"Total savings: {convert_bytes(total_savings_bytes)}")
-        print(f"Time taken: {elapsed_time:.2f} seconds")
+        print(f"Time taken: {format_time(elapsed_time)}")
     else:
         print("\nNo new files were optimized.")
 
