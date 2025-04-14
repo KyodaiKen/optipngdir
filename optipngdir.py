@@ -171,7 +171,7 @@ def optimize_png(progress_bar, original_filename, optipng_path="optipngp", optim
             os.rename(original_filename, temp_filename)
             filename_to_process = temp_filename
             renamed = True
-            progress_bar.write(f"{worker_prefix}Renamed '{original_filename}' to '{temp_filename}' for optipng processing.")
+            #progress_bar.write(f"{worker_prefix}Renamed '{original_filename}' to '{temp_filename}' for optipng processing.")
         except OSError as e:
             return [], False, f"Error renaming file '{original_filename}': {e}", 0
 
@@ -204,7 +204,7 @@ def optimize_png(progress_bar, original_filename, optipng_path="optipngp", optim
         if renamed and os.path.exists(temp_filename) and original_filename != temp_filename:
             try:
                 os.rename(temp_filename, original_filename)
-                progress_bar.write(f"{worker_prefix}Renamed '{temp_filename}' back to '{original_filename}'.")
+                #progress_bar.write(f"{worker_prefix}Renamed '{temp_filename}' back to '{original_filename}'.")
             except OSError as e:
                 progress_bar.write(f"{worker_prefix}Error renaming '{temp_filename}' back to '{original_filename}': {e}")
 

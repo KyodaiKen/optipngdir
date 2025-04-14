@@ -9,7 +9,7 @@ import sys
 def normalize_path_for_windows(path):
     """Prepends \\?\ to the path on Windows to enable long paths."""
     if os.name == 'nt' and not path.startswith('\\\\?\\'):
-        return '\\\\?\\' + path
+        return '\\\\?\\' + os.path.abspath(path)
     return path
 
 def check_and_fix_file_extension(directory, recursive=False, fix=False, masks=None, list_file=None):
@@ -70,7 +70,7 @@ def check_and_fix_file_extension(directory, recursive=False, fix=False, masks=No
                             new_path = os.path.join(root, new_filename)
                             #On Windows NT make it POSIX
                             if os.name == 'nt' and not new_path.startswith('\\\\?\\'):
-                                new_path = '\\\\?\\' + new_path
+                                new_path = '\\\\?\\' + os.path.abspath(new_path)
                             if not os.path.exists(new_path):
                                 os.rename(long_path, new_path)
                                 progress_bar.write(f"  Renamed to: {os.path.join(root, new_filename)}")
