@@ -59,8 +59,7 @@ def load_and_clean_timestamps(timestamp_file, directory, recursive):
         with open(timestamp_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
             optimized_timestamps = {
-                unicodedata.normalize('NFC', key.replace(os.path.sep, '/')): value
-                for key, value in data.items()
+                unicodedata.normalize('NFC', key.replace(os.path.sep, '/')): value for key, value in data.items()
             }
     except FileNotFoundError:
         optimized_timestamps = {}
@@ -77,7 +76,8 @@ def load_and_clean_timestamps(timestamp_file, directory, recursive):
         for file in files:
             if file.lower().endswith(".png"):
                 original_path = os.path.join(root, file)
-                normalized_path = unicodedata.normalize('NFC', original_path.replace(os.path.sep, '/'))
+                relative_path = os.path.relpath(original_path, directory)
+                normalized_path = unicodedata.normalize('NFC', relative_path.replace(os.path.sep, '/'))
                 existing_png_files[normalized_path] = original_path
 
     timestamps_to_keep = {}
@@ -97,9 +97,10 @@ def load_and_clean_timestamps(timestamp_file, directory, recursive):
 
     return timestamps_to_keep, existing_png_files
 
-def add_optimized_timestamp(optimized_timestamps, filename, timestamp):
+def add_optimized_timestamp(optimized_timestamps, filename, directory, timestamp):
     """Adds a processed file and a timestamp to the processed files set"""
-    file_key = unicodedata.normalize('NFC', filename.replace(os.path.sep, '/'))
+    file_key = os.path.relpath(filename, directory)
+    file_key = unicodedata.normalize('NFC', file_key.replace(os.path.sep, '/'))
     optimized_timestamps[file_key] = timestamp
 
 def save_optimized_timestamps(optimized_timestamps, timestamp_file):
@@ -246,7 +247,7 @@ def main():
     worker_id_counter = 1
 
     def worker(filename, worker_id):
-        nonlocal processed_count, successful_optimizations, total_savings_bytes, progress_bar
+        nonlocal processed_count, successful_optimizations, total_savings_bytes, progress_bar, directory
 
         if exit_requested:
             progress_bar.write(f"[Worker {worker_id}] Received exit signal. Terminating.")
@@ -254,19 +255,19 @@ def main():
 
         worker_progress[filename] = {'status': 'Processing', 'output': ''}
         command, success, output, savings = optimize_png(filename, optipng_path, optimization_level, worker_id, worker_progress)
-        str_command = " ".join(command)
         if not exit_requested:
             if success:
                 successful_optimizations += 1
                 total_savings_bytes += savings
                 worker_progress[filename]['status'] = 'Done'
-                add_optimized_timestamp(optimized_timestamps, filename, os.path.getmtime(filename))
+                add_optimized_timestamp(optimized_timestamps, filename, directory, os.path.getmtime(filename))
             else:
                 worker_progress[filename]['status'] = 'Error'
                 worker_progress[filename]['output'] = output.strip().decode('utf-8', errors='replace')
-                progress_bar.write(colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold']))
-                progress_bar.write(colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan'))
-                progress_bar.write(worker_progress[filename]['output']+"\n")
+                str_command = " ".join(command)
+                progress_bar.write(colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold']) + 
+                                   colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan') + 
+                                   worker_progress[filename]['output']+"\n")
             processed_count += 1
             progress_bar.unit="S "+convert_bytes(total_savings_bytes)
             progress_bar.update(1)
