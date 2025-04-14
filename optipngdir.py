@@ -48,9 +48,13 @@ def convert_bytes(num):
         num /= 1024.0
     return f"{num:.2f} YB"
 
-def load_optimized_timestamps(timestamp_file, directory):
-    """Loads timestamps, normalizes keys, and identifies non-existent files more efficiently."""
+def load_and_clean_timestamps(timestamp_file, directory, recursive):
+    """Loads timestamps, normalizes keys, removes duplicates and non-existent files in a single walk."""
     optimized_timestamps = {}
+    existing_png_files = {}  # Use a dict to store {normalized_path: original_path}
+    files_to_remove = []
+    removed_count = 0
+
     try:
         with open(timestamp_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -59,30 +63,39 @@ def load_optimized_timestamps(timestamp_file, directory):
                 for key, value in data.items()
             }
     except FileNotFoundError:
-        return {}
+        optimized_timestamps = {}
     except json.JSONDecodeError:
         print(f"Warning: Corrupted timestamp file. Starting fresh.")
-        return {}
+        optimized_timestamps = {}
 
-    existing_png_files = set()
-    for root, _, files in os.walk(directory):
+    if recursive:
+        walk_generator = os.walk(directory)
+    else:
+        walk_generator = [(directory, [], [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))])]
+
+    for root, _, files in walk_generator:
         for file in files:
-            fn = os.path.join(root, file).replace(os.path.sep, '/')
-            existing_png_files.add(unicodedata.normalize('NFC', fn))
+            if file.lower().endswith(".png"):
+                original_path = os.path.join(root, file)
+                normalized_path = unicodedata.normalize('NFC', original_path.replace(os.path.sep, '/'))
+                existing_png_files[normalized_path] = original_path
 
-    files_to_remove = set(optimized_timestamps.keys()) - existing_png_files
-    if files_to_remove:
-        print(f"Removed {len(files_to_remove)} timestamps for non-existent files.")
-        updated_timestamps = {
-            key: value for key, value in optimized_timestamps.items() if key in existing_png_files
-        }
+    timestamps_to_keep = {}
+    for normalized_key, timestamp in optimized_timestamps.items():
+        if normalized_key in existing_png_files:
+            timestamps_to_keep[normalized_key] = timestamp
+        else:
+            removed_count += 1
+
+    if removed_count > 0:
+        print(f"Removed {removed_count} timestamps for non-existent files.")
         try:
             with open(timestamp_file, 'w', encoding='utf-8') as f:
-                json.dump(updated_timestamps, f)
+                json.dump(timestamps_to_keep, f)
         except IOError:
             print(f"Error: Could not save updated timestamps in {timestamp_file}.")
-        return updated_timestamps
-    return optimized_timestamps
+
+    return timestamps_to_keep, existing_png_files
 
 def add_optimized_timestamp(optimized_timestamps, filename, timestamp):
     """Adds a processed file and a timestamp to the processed files set"""
@@ -193,29 +206,22 @@ def main():
         print(f"Error: Directory '{directory}' not found.")
         return
 
-    png_files = find_png_files(directory, recursive)
-    total_files = len(png_files)
-    if not png_files:
-        print(f"No PNG files found in '{directory}'{' and its subdirectories' if recursive else ' (top level only)'}.")
-        return
-
     timestamp_file = os.path.join(directory, ".optimized_png_timestamps.json")
-    optimized_timestamps = load_optimized_timestamps(timestamp_file, directory)
+    optimized_timestamps, existing_png_files_map = load_and_clean_timestamps(timestamp_file, directory, recursive)
     files_to_optimize = []
     skipped_count = 0
+    total_files_found = len(existing_png_files_map)
 
-    # Register the signal handler for SIGINT
     signal.signal(signal.SIGINT, signal_handler)
 
-    for filename in png_files:
-        file_key = filename.replace(os.path.sep, '/')
-        current_timestamp = os.path.getmtime(filename)
-        if file_key in optimized_timestamps and optimized_timestamps[file_key] == current_timestamp:
+    for normalized_path, original_path in existing_png_files_map.items():
+        current_timestamp = os.path.getmtime(original_path)
+        if normalized_path in optimized_timestamps and optimized_timestamps[normalized_path] == current_timestamp:
             skipped_count += 1
         else:
-            files_to_optimize.append(filename)
+            files_to_optimize.append(original_path)
 
-    print(f"Found {total_files} PNG files.")
+    print(f"Found {total_files_found} PNG files.")
     print(f"Skipping {skipped_count} already optimized files.")
     if not files_to_optimize:
         print("No new files to optimize.")
@@ -226,7 +232,7 @@ def main():
     progress_bar = tqdm(total=len(files_to_optimize),
                         desc="",
                         bar_format=colored("", 'light_blue') + colored("{bar}", 'light_blue') + colored("", 'light_blue') +
-                                    " {percentage:.2f}% {n_fmt}/{total_fmt} T {elapsed}/{remaining} {unit}",
+                                           " {percentage:.2f}% {n_fmt}/{total_fmt} T {elapsed}/{remaining} {unit}",
                         unit="S "+convert_bytes(0),
                         dynamic_ncols=True,
                         smoothing=smoothing,
@@ -241,13 +247,14 @@ def main():
 
     def worker(filename, worker_id):
         nonlocal processed_count, successful_optimizations, total_savings_bytes, progress_bar
-        
+
         if exit_requested:
             progress_bar.write(f"[Worker {worker_id}] Received exit signal. Terminating.")
             return
 
         worker_progress[filename] = {'status': 'Processing', 'output': ''}
         command, success, output, savings = optimize_png(filename, optipng_path, optimization_level, worker_id, worker_progress)
+        str_command = " ".join(command)
         if not exit_requested:
             if success:
                 successful_optimizations += 1
@@ -258,7 +265,7 @@ def main():
                 worker_progress[filename]['status'] = 'Error'
                 worker_progress[filename]['output'] = output.strip().decode('utf-8', errors='replace')
                 progress_bar.write(colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold']))
-                progress_bar.write(colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {command}\nOPTIPNG terminal output:\n", 'light_cyan'))
+                progress_bar.write(colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan'))
                 progress_bar.write(worker_progress[filename]['output']+"\n")
             processed_count += 1
             progress_bar.unit="S "+convert_bytes(total_savings_bytes)
@@ -274,7 +281,7 @@ def main():
     for filename in files_to_optimize:
         if exit_requested:
             break
-        
+
         # Wait if we have reached the maximum number of running workers
         while running_workers >= max_worker_threads:
             time.sleep(0.05)
