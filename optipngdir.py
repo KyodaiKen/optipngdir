@@ -157,15 +157,15 @@ def format_time(seconds):
 
     return f"{':'.join(parts)}.{milliseconds:03d}"
 
-def optimize_png(progress_bar, original_filename, optipng_path="optipngp", optimization_level=5, worker_id=None, progress_dict=None, fix_errors=False):
+def optimize_png(progress_bar, original_filename, optipng_path="optipngp", optimization_level=5, worker_id=None, fix_errors=False):
     """Optimizes a single PNG file using optipng and reports progress, handling Unicode filenames."""
     worker_prefix = f"[Worker {worker_id}] " if worker_id is not None else ""
-    original_size = get_file_size(original_filename)
     temp_filename = None
+    original_size = get_file_size(original_filename)
     filename_to_process = original_filename
     renamed = False
 
-    if has_unicode(original_filename) and get_os() == "Windows":
+    if has_unicode(original_filename) or len(original_filename) > 260:
         temp_filename = generate_temp_filename(original_filename)
         try:
             os.rename(original_filename, temp_filename)
@@ -197,19 +197,16 @@ def optimize_png(progress_bar, original_filename, optipng_path="optipngp", optim
             stdout = stdout_bytes.decode(errors='replace')
             stderr = stderr_bytes.decode(errors='replace')
 
-        for line in stdout.splitlines():
-            if progress_dict is not None and original_filename in progress_dict:
-                progress_dict[original_filename]['worker_output'] = line.strip()
-
         if renamed and os.path.exists(temp_filename) and original_filename != temp_filename:
             try:
                 os.rename(temp_filename, original_filename)
                 #progress_bar.write(f"{worker_prefix}Renamed '{temp_filename}' back to '{original_filename}'.")
             except OSError as e:
                 progress_bar.write(f"{worker_prefix}Error renaming '{temp_filename}' back to '{original_filename}': {e}")
+                original_filename = temp_filename
 
         if process.returncode == 0:
-            optimized_size = get_file_size(filename_to_process)
+            optimized_size = get_file_size(original_filename)
             savings = original_size - optimized_size
             return command, True, stdout.strip(), savings
         else:
@@ -318,21 +315,17 @@ def main():
             progress_bar.write(f"[Worker {worker_id}] Received exit signal. Terminating.")
             return
 
-        worker_progress[filename] = {'status': 'Processing', 'output': ''}
-        command, success, output, savings = optimize_png(progress_bar, filename, optipng_path, optimization_level, worker_id, worker_progress, fix_errors)
+        command, success, output, savings = optimize_png(progress_bar, filename, optipng_path, optimization_level, worker_id, fix_errors)
         if not exit_requested:
             if success:
                 successful_optimizations += 1
                 total_savings_bytes += savings
-                worker_progress[filename]['status'] = 'Done'
                 add_optimized_timestamp(optimized_timestamps, filename, directory, get_modified_time_long_path(filename))
             else:
-                worker_progress[filename]['status'] = 'Error'
-                worker_progress[filename]['output'] = output
                 str_command = " ".join(command)
                 progress_bar.write(colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold']) +
                                    colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan') +
-                                   worker_progress[filename]['output']+"\n")
+                                   output+"\n")
             processed_count += 1
             progress_bar.unit="S "+convert_bytes(total_savings_bytes)
 
