@@ -21,13 +21,37 @@ def has_unicode(filename):
     """Checks if a filename contains Unicode characters."""
     return bool(UNICODE_DETECT_REGEX.search(filename))
 
+def get_path_root(path):
+    """
+    Gets the root of a path, handling Windows drives and attempting to
+    identify Linux mount points (like /mnt/nas).
+    """
+    drive = os.path.splitdrive(path)[0]
+    if drive:
+        return drive
+    elif os.path.isabs(path):
+        parts = path.split('/')
+        if len(parts) > 1 and parts[1]:
+            if parts[1] in ('mnt', 'media', 'opt'): # Common mount point directories
+                if len(parts) > 2 and parts[2]:
+                    return '/' + parts[1] + '/' + parts[2]
+                else:
+                    return '/' + parts[1]
+            else:
+                return '/' + parts[1]
+        elif path == '/':
+            return '/'
+    return ''
+
 def generate_temp_filename(filename):
     """Generates a temporary filename based on the hash of the original (Unicode-aware)."""
-    filepath, base = os.path.split(os.path.abspath(filename))
-    base, ext = os.path.splitext(base)
-    encoded_base = base.encode('utf-8')
-    hashed_base = hashlib.md5(encoded_base).hexdigest()[:8]  # Use first 8 chars of MD5 hash
-    return os.path.join(filepath, f"{hashed_base}_temp{ext}")
+    fullfilename = os.path.abspath(filename)
+    basepath = get_path_root(fullfilename)
+    if basepath.endswith(":") and os.name == 'nt':
+        basepath = basepath + "\\"
+    hashword = fullfilename.encode('utf-8')
+    hashed = hashlib.md5(hashword).hexdigest()
+    return os.path.join(basepath, hashed)
 
 def get_os():
     """Determines the operating system."""
@@ -161,12 +185,19 @@ def optimize_png(progress_bar, original_filename, optipng_path="optipngp", optim
     """Optimizes a single PNG file using optipng and reports progress, handling Unicode filenames."""
     worker_prefix = f"[Worker {worker_id}] " if worker_id is not None else ""
     temp_filename = None
-    original_size = get_file_size(original_filename)
     filename_to_process = original_filename
+    posix_filename = ""
+    if len(original_filename) > 255 and os.name == 'nt' and not original_filename.startswith('\\\\?\\'):
+        posix_filename = '\\\\?\\' + os.path.abspath(original_filename)
+        original_size = get_file_size(posix_filename)
+    else:
+        original_size = get_file_size(original_filename)
     renamed = False
 
-    if has_unicode(original_filename) or len(original_filename) > 260:
+    if has_unicode(original_filename) or len(original_filename) > 255:
         temp_filename = generate_temp_filename(original_filename)
+        if posix_filename > "":
+            original_filename = posix_filename
         try:
             os.rename(original_filename, temp_filename)
             filename_to_process = temp_filename
