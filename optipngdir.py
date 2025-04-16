@@ -1,6 +1,7 @@
 import subprocess
 import os
 import sys
+import shutil
 import platform
 import signal
 import unicodedata
@@ -13,9 +14,23 @@ import hashlib
 from termcolor import colored
 from tqdm import tqdm
 
+# ANSI escape code to switch to the alternate screen
+enter_alt_screen = "\033[?1049h"
+# ANSI escape code to switch back to the normal screen
+exit_alt_screen = "\033[?1049l"
+
 # Global flag to indicate if a clean exit has been requested
 exit_requested = False
+
 UNICODE_DETECT_REGEX = re.compile(r'[^\x00-\x7F]')  # Matches any non-ASCII character
+
+termlines = []
+errlines = []
+
+def printl(strIn):
+    global termlines
+    termlines.append(strIn)
+    print(strIn)
 
 def has_unicode(filename):
     """Checks if a filename contains Unicode characters."""
@@ -53,6 +68,32 @@ def generate_temp_filename(filename):
     hashed = hashlib.md5(hashword).hexdigest()
     return os.path.join(basepath, hashed)
 
+def get_terminal_width():
+    try:
+        return shutil.get_terminal_size().columns
+    except OSError:
+        return 80  # Default width if unable to get
+
+def shorten_filename(filename, max_width):
+    """Shortens a filename to fit within the maximum width, preserving the extension."""
+    if len(filename) <= max_width:
+        return filename
+
+    name, ext = os.path.splitext(os.path.basename(filename))
+
+    if len(name) + len(ext) + 3 <= max_width:  # 3 for the ellipsis
+        return name + "..." + ext
+    elif len(ext) + 3 >= max_width:
+        return "..." + ext[:max_width - 3]
+    elif 3 >= max_width:
+        return filename[:max_width] # Very short width, just truncate
+
+    available_width = max_width - len(ext) - 3
+    if available_width > 0:
+        return name[:available_width] + "..." + ext
+    else:
+        return "..." + ext # Should not happen with the earlier checks, but as a fallback
+
 def get_os():
     """Determines the operating system."""
     if sys.platform.startswith('linux'):
@@ -71,13 +112,13 @@ def get_modified_time_long_path(filepath):
     try:
         return os.path.getmtime(filepath)
     except OSError as e:
-        print(f"Error getting modification time for '{filepath}': {e}")
+        printl(f"Error getting modification time for '{filepath}': {e}")
         return None
 
 def signal_handler(sig, frame):
     """Handles the SIGINT signal (CTRL+C)."""
     global exit_requested
-    print("\nCTRL+C pressed. Initiating clean exit...")
+    printl("\nCTRL+C pressed. Initiating clean exit...")
     exit_requested = True
     # You might want to set a flag for your worker threads to stop
     # their current processing gracefully if possible.
@@ -113,7 +154,7 @@ def load_and_clean_timestamps(timestamp_file, directory, recursive):
     except FileNotFoundError:
         optimized_timestamps = {}
     except json.JSONDecodeError:
-        print(f"Warning: Corrupted timestamp file. Starting fresh.")
+        printl(f"Warning: Corrupted timestamp file. Starting fresh.")
         optimized_timestamps = {}
 
     if recursive:
@@ -137,12 +178,12 @@ def load_and_clean_timestamps(timestamp_file, directory, recursive):
             removed_count += 1
 
     if removed_count > 0:
-        print(f"Removed {removed_count} timestamps for non-existent files.")
+        printl(f"Removed {removed_count} timestamps for non-existent files.")
         try:
             with open(timestamp_file, 'w', encoding='utf-8') as f:
                 json.dump(timestamps_to_keep, f)
         except IOError:
-            print(f"Error: Could not save updated timestamps in {timestamp_file}.")
+            printl(f"Error: Could not save updated timestamps in {timestamp_file}.")
 
     return timestamps_to_keep, existing_png_files
 
@@ -158,7 +199,7 @@ def save_optimized_timestamps(optimized_timestamps, timestamp_file):
         with open(timestamp_file, 'w', encoding='utf-8') as f:
             json.dump(optimized_timestamps, f)
     except IOError:
-        print(f"Error: Could not save optimized timestamps in {timestamp_file}.")
+        printl(f"Error: Could not save optimized timestamps in {timestamp_file}.")
 
 def format_time(seconds):
     """Formats seconds into days:HH:MM:SS.ms, showing only relevant parts."""
@@ -265,7 +306,8 @@ def find_png_files(directory, recursive=True):
     return png_files
 
 def main():
-    parser = argparse.ArgumentParser(description="Optimize PNG files in a directory using optipng with multithreading and progress bar.")
+    app_descr = "optipngdir - Optimize PNG files in a directory using optipng with multithreading and progress bar."
+    parser = argparse.ArgumentParser(description=app_descr)
     parser.add_argument("directory", help="The directory containing the PNG files to optimize.")
     parser.add_argument("-t", "--threads", type=int, default=8, help="The number of threads to use for parallel optimization (default: 8).")
     parser.add_argument("-o", "--optimization-level", type=int, default=5, choices=range(0, 8), help="The optipng optimization level (0-7, default: 5).")
@@ -281,25 +323,33 @@ def main():
     recursive = args.recursive
     fix_errors = args.fix
 
+    sys.stdout.write(enter_alt_screen)
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+    printl(colored(app_descr, 'light_cyan'))
+
     if optipng_path == "default":
         operating_system = get_os()
 
         if operating_system == "Linux":
-            print("Running on Linux, using optipngp shell script to preserve timestamps.")
+            printl("Running on Linux, using optipngp shell script to preserve timestamps.")
             optipng_path = "optipngp"
         elif operating_system == "macOS":
-            print("Running on MacOS, using optipngp shell script to preserve timestamps.")
+            printl("Running on MacOS, using optipngp shell script to preserve timestamps.")
             optipng_path = "optipngp"
         elif operating_system == "Windows":
-            print("Running on Windows, using optipng directly with the -preserve parameter.")
+            printl("Running on Windows, using optipng directly with the -preserve parameter.")
             optipng_path = "optipng"
         else:
-            print(f"Running on an unidentified operating system: {operating_system}")
+            printl(f"Running on an unidentified operating system: {operating_system}")
             optipng_path = "optipng"
 
     if not os.path.isdir(directory):
-        print(f"Error: Directory '{directory}' not found.")
+        printl(f"Error: Directory '{directory}' not found.")
         return
+
+    printl("Gathering files to be processed, please wait...")
 
     timestamp_file = os.path.join(directory, ".optimized_png_timestamps.json")
     optimized_timestamps, existing_png_files_map = load_and_clean_timestamps(timestamp_file, directory, recursive)
@@ -316,13 +366,13 @@ def main():
         else:
             files_to_optimize.append(original_path)
 
-    print(f"Found {total_files_found} PNG files{' recursively' if recursive else ''}.")
-    print(f"Skipping {skipped_count} already optimized files.")
+    printl(f"Found {total_files_found} PNG files{' recursively' if recursive else ''}.")
+    printl(f"Skipping {skipped_count} already optimized files.")
     if not files_to_optimize:
-        print("No new files to optimize.")
+        printl("No new files to optimize.")
         return
 
-    print(f"Optimizing {len(files_to_optimize)} new/modified PNG files using {num_threads} threads.")
+    printl(f"Optimizing {len(files_to_optimize)} new/modified PNG files using {num_threads} threads.")
 
     start_time = time.time()
 
@@ -332,21 +382,56 @@ def main():
                                            " {percentage:.2f}% {n_fmt}/{total_fmt} T {elapsed}/{remaining} {unit}",
                         unit="S "+convert_bytes(0),
                         dynamic_ncols=True)
+
+    max_worker_threads = args.threads
     processed_count = 0
     successful_optimizations = 0
     total_savings_bytes = 0
-    worker_progress = {}
-    threads = []
+    running_workers = 0
+    worker_threads = []
+    worker_progress = []
     worker_id_counter = 1
+    error_count = 0
+
+    def check_running():
+        nonlocal worker_threads, worker_progress, running_workers
+        # Check for finished threads and clean them up
+        finished_threads = [t for t in worker_threads if not t.is_alive()]
+        for finished_thread in finished_threads:
+            finished_thread.join()  # Ensure thread has fully completed
+            if hasattr(finished_thread, 'worker_id'):
+                worker_progress = [w for w in worker_progress if w['id'] != finished_thread.worker_id]
+            worker_threads.remove(finished_thread)
+            running_workers -= 1
+        return finished_threads
+
+    def print_workers():
+        global termlines
+        nonlocal worker_progress, worker_id_counter, progress_bar
+        #Print all running workers with file names:
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+        for termline in termlines:
+            progress_bar.write(termline)
+        for wi in worker_progress:
+            wid_cols = len(str(worker_id_counter))
+            msg = f"Worker {wi['id']:{wid_cols}d} processing: "
+            swfn = shorten_filename(wi['fn'], get_terminal_width() - len(msg))
+            progress_bar.write(msg+swfn)
 
     def worker(filename, worker_id):
-        nonlocal files_to_optimize, processed_count, successful_optimizations, total_savings_bytes, progress_bar, directory, fix_errors
+        nonlocal files_to_optimize, processed_count, successful_optimizations, total_savings_bytes, progress_bar, directory, fix_errors, worker_progress, error_count
+        global termlines, errlines
 
         if exit_requested:
             progress_bar.write(f"[Worker {worker_id}] Received exit signal. Terminating.")
             return
+    
+        if worker_id not in worker_progress:
+            worker_progress.append({'id':worker_id,'fn':filename})
 
         command, success, output, savings = optimize_png(progress_bar, filename, optipng_path, optimization_level, worker_id, fix_errors)
+
         if not exit_requested:
             if success:
                 successful_optimizations += 1
@@ -354,13 +439,25 @@ def main():
                 add_optimized_timestamp(optimized_timestamps, filename, directory, get_modified_time_long_path(filename))
             else:
                 str_command = " ".join(command)
-                progress_bar.write(colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold']) +
-                                   colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan') +
-                                   output+"\n")
+                to_log = colored(f"\n(x) ERROR TRYING TO PROCESS FILE!\n", 'light_red', attrs=['bold'])+colored(f"File name: {filename}\nWorker ID: {worker_id}\nCommand: {str_command}\nOPTIPNG terminal output:\n", 'light_cyan')+output+"\n"
+                #progress_bar.write(to_log)
+                errlines.append(to_log)
+                error_count += 1
             processed_count += 1
-            progress_bar.unit="S "+convert_bytes(total_savings_bytes)
+
+            str_savings = ""
+            if total_savings_bytes > 0:
+                str_savings = colored("S "+convert_bytes(total_savings_bytes), 'light_magenta')
+            else:
+                str_savings = "S 0"
+
+            if error_count > 0:
+                progress_bar.unit=colored(f"E {error_count}", 'light_red')+" "+str_savings
+            else:
+                progress_bar.unit=str_savings
 
             time_finished = time.time()
+
             if processed_count > 0:
                 avg_processing_time = (time_finished - start_time) / processed_count
                 remaining_files = len(files_to_optimize) - processed_count
@@ -373,37 +470,47 @@ def main():
         else:
             progress_bar.write(f"[Worker {worker_id}] Optimization of {os.path.basename(filename)} interrupted.")
 
-    max_worker_threads = args.threads
-    running_workers = 0
-    worker_threads = []
-    worker_id_counter = 1
-
     for filename in files_to_optimize:
         if exit_requested:
             break
 
         # Wait if we have reached the maximum number of running workers
         while running_workers >= max_worker_threads:
-            time.sleep(0.05)
             # Check for finished threads and clean them up
-            worker_threads = [t for t in worker_threads if t.is_alive()]
-            running_workers = len(worker_threads)
+            finished_threads = check_running()
+            if len(finished_threads) > 0:
+                print_workers()
+            time.sleep(0.05)
 
         thread = threading.Thread(target=worker, args=(filename, worker_id_counter))
+        thread.worker_id = worker_id_counter
         worker_threads.append(thread)
         thread.start()
-        #print(f"[Worker {worker_id_counter}] Optimization of {os.path.basename(filename)} started.")
+        print_workers()
+
+        #printl(f"[Worker {worker_id_counter}] Optimization of {os.path.basename(filename)} started.")
         running_workers += 1
         worker_id_counter += 1
 
     for thread in worker_threads:
+        # Check for finished threads and clean them up
+        _ = check_running()
+        print_workers()
         thread.join()
 
     save_optimized_timestamps(optimized_timestamps, timestamp_file)
 
     progress_bar.close()
     end_time = time.time()
+
+    sys.stdout.write(exit_alt_screen)
+    sys.stdout.flush()
+
     elapsed_time = end_time - start_time
+
+    #Print all errors
+    for errln in errlines:
+        print(errln)
 
     if len(files_to_optimize) > 0:
         print(f"\nOptimization complete.")
