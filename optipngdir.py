@@ -398,7 +398,7 @@ def main():
         # Check for finished threads and clean them up
         finished_threads = [t for t in worker_threads if not t.is_alive()]
         for finished_thread in finished_threads:
-            finished_thread.join()  # Ensure thread has fully completed
+            finished_thread.join()
             if hasattr(finished_thread, 'worker_id'):
                 worker_progress = [w for w in worker_progress if w['id'] != finished_thread.worker_id]
             worker_threads.remove(finished_thread)
@@ -426,9 +426,6 @@ def main():
         if exit_requested:
             progress_bar.write(f"[Worker {worker_id}] Received exit signal. Terminating.")
             return
-    
-        if worker_id not in worker_progress:
-            worker_progress.append({'id':worker_id,'fn':filename})
 
         command, success, output, savings = optimize_png(progress_bar, filename, optipng_path, optimization_level, worker_id, fix_errors)
 
@@ -466,9 +463,12 @@ def main():
             else:
                 progress_bar.set_postfix(est_rem="?")
 
-            progress_bar.update(1)
         else:
             progress_bar.write(f"[Worker {worker_id}] Optimization of {os.path.basename(filename)} interrupted.")
+
+        worker_progress = [w for w in worker_progress if w['id'] != worker_id]
+        print_workers()
+        progress_bar.update(1)
 
     for filename in files_to_optimize:
         if exit_requested:
@@ -476,17 +476,21 @@ def main():
 
         # Wait if we have reached the maximum number of running workers
         while running_workers >= max_worker_threads:
+            time.sleep(0.05)
+
             # Check for finished threads and clean them up
             finished_threads = check_running()
             if len(finished_threads) > 0:
                 print_workers()
-            time.sleep(0.05)
 
         thread = threading.Thread(target=worker, args=(filename, worker_id_counter))
         thread.worker_id = worker_id_counter
         worker_threads.append(thread)
         thread.start()
-        print_workers()
+        
+        if worker_id_counter not in worker_progress:
+            worker_progress.append({'id':worker_id_counter,'fn':filename})
+            print_workers()
 
         #printl(f"[Worker {worker_id_counter}] Optimization of {os.path.basename(filename)} started.")
         running_workers += 1
@@ -494,9 +498,10 @@ def main():
 
     for thread in worker_threads:
         # Check for finished threads and clean them up
-        _ = check_running()
-        print_workers()
         thread.join()
+        worker_threads.remove(thread)
+        running_workers -= 1
+        print_workers()
 
     save_optimized_timestamps(optimized_timestamps, timestamp_file)
 
